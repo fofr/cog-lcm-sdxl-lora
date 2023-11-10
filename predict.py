@@ -5,7 +5,13 @@ import datetime
 import tarfile
 import numpy as np
 from typing import List
-from diffusers import ControlNetModel, DiffusionPipeline, AutoPipelineForImage2Image
+from diffusers import (
+    ControlNetModel,
+    DiffusionPipeline,
+    AutoPipelineForImage2Image,
+    UNet2DConditionModel,
+    LCMScheduler,
+)
 from cog import BasePredictor, Input, Path
 from PIL import Image
 
@@ -16,26 +22,38 @@ class Predictor(BasePredictor):
         torch_device = "cuda"
         torch_dtype = torch.float16
 
-        self.txt2img_pipe = DiffusionPipeline.from_pretrained(
-            "SimianLuo/LCM_Dreamshaper_v7",
+        unet = UNet2DConditionModel.from_pretrained(
+            "latent-consistency/lcm-sdxl",
+            torch_dtype=torch.float16,
+            variant="fp16",
             cache_dir="model_cache",
-            local_files_only=True,
+            # local_files_only=True,
         )
 
-        self.txt2img_pipe.to(torch_device=torch_device, torch_dtype=torch_dtype)
+        self.txt2img_pipe = DiffusionPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            unet=unet,
+            torch_dtype=torch_dtype,
+            cache_dir="model_cache",
+            # local_files_only=True,
+        ).to(torch_device=torch_device)
+        self.txt2img_pipe.scheduler = LCMScheduler.from_config(
+            self.txt2img_pipe.scheduler.config
+        )
 
         self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
-            "SimianLuo/LCM_Dreamshaper_v7",
+            "stabilityai/stable-diffusion-xl-base-1.0",
             cache_dir="model_cache",
-            local_files_only=True,
-        )
-
-        self.img2img_pipe.to(torch_device=torch_device, torch_dtype=torch_dtype)
+            unet=unet,
+            torch_dtype=torch_dtype,
+            # local_files_only=True,
+        ).to(torch_device=torch_device)
+        self.img2img_pipe.scheduler = self.txt2img_pipe.scheduler
 
         controlnet_canny = ControlNetModel.from_pretrained(
             "lllyasviel/control_v11p_sd15_canny",
             cache_dir="model_cache",
-            local_files_only=True,
+            # local_files_only=True,
             torch_dtype=torch_dtype,
         ).to(torch_device)
 
@@ -252,10 +270,12 @@ class Predictor(BasePredictor):
             print("txt2img mode")
             pipe = self.txt2img_pipe
 
+        generator = torch.manual_seed(seed)
         common_args = {
             "width": width,
             "height": height,
             "prompt": prompt,
+            "generator": generator,
             "guidance_scale": guidance_scale,
             "num_images_per_prompt": num_images,
             "num_inference_steps": num_inference_steps,
